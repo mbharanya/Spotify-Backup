@@ -1,29 +1,34 @@
-import java.io.{BufferedWriter, File, FileWriter, IOException}
+import java.io.{BufferedWriter, File, FileWriter}
 import java.time.LocalDateTime
+import java.util.concurrent.Executors
 
 import com.wrapper.spotify.SpotifyApi
-import com.wrapper.spotify.exceptions.SpotifyWebApiException
 import com.wrapper.spotify.model_objects.specification.{Paging, SavedTrack}
 
 import scala.compat.java8.FutureConverters._
-import scala.concurrent.{ExecutionContext, Future}
+import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.util.Try
+import scala.concurrent.duration._
 
 
 object SpotifyBackup extends App {
-  val accessToken = "BQCznYs8Jn2bRDsXAEcCJ1ozGGMHHuf_mzrhohu0sHVP0Z7kDvNTvSyAkv-kdjdjFCdTI1-KkxndxEhosB_jAlaLGnD6S30PdmvwacJXa8U5X5U2QnNxEk9qPDg6ttQ75zCfRqzTpYN38stks2Exc-hD4WU5Su_MSKRB"
+  val accessToken = "-"
 
-  implicit val executionCtx = ExecutionContext.global
+  implicit val executionCtx = ExecutionContext.fromExecutorService(Executors.newFixedThreadPool(1))
 
   val spotifyApi = new SpotifyApi.Builder().setAccessToken(accessToken).build
 
-  for {
-    tracks: List[SavedTrack] <- findAll()
-    _ = writeToFile(tracks)
-  } yield ()
+
+    val fut = for {
+      tracks: List[SavedTrack] <- findAll()
+      success = writeToFile(tracks)
+    } yield (success)
+
+  fut.onComplete(_ => executionCtx.shutdown())
 
 
   def findAll(offset: Int = 0, tracks: List[SavedTrack] = Nil): Future[List[SavedTrack]] = {
+    if (offset == 0) print("Fetching from Spotify: ")
     val pagingFuture: Future[Paging[SavedTrack]] = toScala(spotifyApi.getUsersSavedTracks.offset(offset).build.executeAsync)
     val offsetTracks: Future[(Int, Int, List[SavedTrack])] = for {
       paging <- pagingFuture
@@ -34,10 +39,13 @@ object SpotifyBackup extends App {
 
 
     offsetTracks.flatMap {
-      case (newOffset, total, items)
-        if (newOffset <= total) => {
-        println(s"page ${offset}/${total}")
-        findAll(newOffset, items ++ tracks)
+      case (newOffset, total, items) => {
+        print(".")
+        if (offset + 20 > total) {
+          Future(items ++ tracks)
+        } else {
+          findAll(newOffset, items ++ tracks)
+        }
       }
       case _ => Future(tracks)
     }.recoverWith {
@@ -49,9 +57,9 @@ object SpotifyBackup extends App {
   }
 
   def writeToFile(lines: List[SavedTrack]) = {
-    println("Writing file")
+    print("\nWriting file: ")
     // FileWriter
-    val file = new File(LocalDateTime.now().toString)
+    val file = new File(LocalDateTime.now().toString + ".csv")
     val bw = new BufferedWriter(new FileWriter(file))
     lines.map(t =>
       s"${t.getTrack.getArtists.map(_.getName).mkString(",")};${t.getTrack.getAlbum.getName};${t.getTrack.getName}\n"
@@ -60,14 +68,13 @@ object SpotifyBackup extends App {
         val writeEither = Try(bw.write(l)).toEither
         writeEither match {
           case Left(err) => err.printStackTrace
-          case _ => {
-            println(s"wrote line ${i + 1}/${lines.length}")
-          }
+          case _ => print(".")
+        }
       }
     }
-  }
 
-  bw.close()
-}
+    bw.close()
+    println(s"\n✅ Wrote ${lines.length} lines")
+  }
 
 }
